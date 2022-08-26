@@ -3,9 +3,11 @@ package chclient
 import (
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -108,7 +110,10 @@ func (c *Client) Run() error {
 	if err := c.Start(); err != nil {
 		return err
 	}
-	return c.Wait()
+	// Wait on stdin so that process terminates with parent process.
+	bytes, _ := ioutil.ReadAll(os.Stdin)
+	c.Infof("Exiting... %s", bytes)
+	return nil
 }
 
 func (c *Client) verifyServer(hostname string, remote net.Addr, key ssh.PublicKey) error {
