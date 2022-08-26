@@ -14,6 +14,7 @@ type tcpProxy struct {
 	id     int
 	count  int
 	remote *chshare.Remote
+	listener net.Listener
 }
 
 func newTCPProxy(c *Client, index int, remote *chshare.Remote) *tcpProxy {
@@ -31,14 +32,15 @@ func (p *tcpProxy) start() error {
 	if err != nil {
 		return fmt.Errorf("%s: %s", p.Logger.Prefix(), err)
 	}
-	go p.listen(l)
+	p.listener = l
+	go p.listen()
 	return nil
 }
 
-func (p *tcpProxy) listen(l net.Listener) {
+func (p *tcpProxy) listen() {
 	p.Infof("Listening")
 	for {
-		src, err := l.Accept()
+		src, err := p.listener.Accept()
 		if err != nil {
 			p.Infof("Accept error: %s", err)
 			return
