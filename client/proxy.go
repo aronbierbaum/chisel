@@ -70,3 +70,13 @@ func (p *tcpProxy) accept(src io.ReadWriteCloser) {
 	s, r := chshare.Pipe(src, dst)
 	l.Infof("Close (sent %d received %d)", s, r)
 }
+
+func (p *tcpProxy) stop() error {
+	if p.listener != nil {
+		p.Infof("Closing")
+		err := p.listener.Close()
+		p.listener = nil
+		return err
+	}
+	return nil
+}
