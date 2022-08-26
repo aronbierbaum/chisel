@@ -1,12 +1,43 @@
 package main
 
+/*
+typedef void (*callback)(_Bool result);
+static callback _connectCb = NULL;
+static callback _disconnectCb = NULL;
+
+static void _registerConnectCallback(callback func) {
+   _connectCb = func;
+}
+static void _registerDisconnectCallback(callback func) {
+   _disconnectCb = func;
+}
+
+static void callConnectCallback(_Bool result) {
+   if (_connectCb != NULL) {
+      _connectCb(result);
+   }
+}
+
+static void callDisconnectCallback(_Bool result) {
+   if (_disconnectCb != NULL) {
+      _disconnectCb(result);
+   }
+}
+*/
+import "C"
+
 import (
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"os"
+	"strings"
 	"strconv"
+	"time"
+	"crypto/x509"
+        "unsafe"
 
 	"github.com/jpillora/chisel/client"
 	"github.com/jpillora/chisel/server"
@@ -27,8 +58,19 @@ var help = `
 
 `
 
-func main() {
+//export RegisterConnectCallback
+func RegisterConnectCallback(v unsafe.Pointer) {
+    C._registerConnectCallback(C.callback(v))
+}
 
+//export RegisterDisconnectCallback
+func RegisterDisconnectCallback(v unsafe.Pointer) {
+    C._registerDisconnectCallback(C.callback(v))
+}
+
+
+func main() {
+/*
 	version := flag.Bool("version", false, "")
 	v := flag.Bool("v", false, "")
 	flag.Bool("help", false, "")
@@ -58,6 +100,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, help)
 		os.Exit(1)
 	}
+*/
 }
 
 var commonHelp = `
@@ -286,4 +329,80 @@ func client(args []string) {
 	if err = c.Run(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// ====================================
+
+var gClient *chclient.Client = nil;
+
+/**
+ * @param keepAlive: Number of seconds between sending ping messages.
+ */
+//export Connect
+func Connect(url string, remotes string, password string, maxAttempts int, keepAlive int, verifyCert bool, caCertsFname string) bool {
+
+   // Build a list of remotes to proxy.
+   // NOTE: We use strings.Repeat() to create a copy of the external string.
+   var remote_vals []string = strings.Split(strings.Repeat(remotes, 1), " ")
+   var err error;
+
+   gClient, err = chclient.NewClient(&chclient.Config{
+      Fingerprint: "",
+      Auth:        "p5:" + password,
+      KeepAlive:   time.Duration(keepAlive) * time.Second,
+      HTTPProxy:   "",
+      Server:      url,
+      Remotes:     remote_vals,
+   })
+   if err != nil {
+      log.Println(err)
+      return false
+   }
+   gClient.Debug = true;
+
+   // Parse certificates if specified.
+   var roots *x509.CertPool = nil;
+   if "" != caCertsFname {
+      data, err := ioutil.ReadFile(caCertsFname)
+      if err == nil {
+         roots = x509.NewCertPool()
+         roots.AppendCertsFromPEM(data)
+      } else {
+         fmt.Printf("Failed to load SSL certificates\n")
+      }
+   }
+
+   tls_config := tls.Config{
+      RootCAs: roots,
+      InsecureSkipVerify: !verifyCert,
+   }
+
+   // Complete asynchronous connection
+   go func() {
+      if err = gClient.Connect(&tls_config, maxAttempts); err != nil {
+         log.Println(err)
+         C.callConnectCallback(false)
+      } else {
+         C.callConnectCallback(true)
+
+         // Monitor connection for disconnection.
+         go func() {
+            gClient.Wait()
+            C.callDisconnectCallback(true)
+         }()
+      }
+   }()
+
+   return true
+}
+
+//export Disconnect
+func Disconnect() {
+   if (gClient != nil) {
+      gClient.Disconnect();
+      gClient = nil;
+   } else {
+      // If we don't have a client then immediately invoke disconnect callback.
+      C.callDisconnectCallback(true)
+   }
 }
