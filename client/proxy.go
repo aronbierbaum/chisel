@@ -47,15 +47,16 @@ func (p *tcpProxy) listen() {
 		}
 		go p.accept(src)
 	}
+	p.Infof("Done listening")
 }
 
 func (p *tcpProxy) accept(src io.ReadWriteCloser) {
 	p.count++
 	cid := p.count
 	l := p.Fork("conn#%d", cid)
-	l.Debugf("Open")
+	l.Infof("Open")
 	if p.client.sshConn == nil {
-		l.Debugf("No server connection")
+		l.Infof("No server connection")
 		src.Close()
 		return
 	}
@@ -67,5 +68,5 @@ func (p *tcpProxy) accept(src io.ReadWriteCloser) {
 	}
 	//then pipe
 	s, r := chshare.Pipe(src, dst)
-	l.Debugf("Close (sent %d received %d)", s, r)
+	l.Infof("Close (sent %d received %d)", s, r)
 }
