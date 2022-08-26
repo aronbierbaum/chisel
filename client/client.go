@@ -1,6 +1,8 @@
 package chclient
 
 import (
+	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -261,4 +263,203 @@ func (c *Client) Close() error {
 		return nil
 	}
 	return c.sshConn.Close()
+}
+
+// ====================================
+
+/**
+ * Connect to the server and starts remote proxies.
+ */
+func (c *Client) Connect(tlsConfig *tls.Config, maxAttempts int) error {
+   via := ""
+   if c.httpProxyURL != nil {
+      via = " via " + c.httpProxyURL.String()
+   }
+   c.Infof("Connecting to %s%s\n", c.server, via)
+
+   var connerr error
+   connect_backoff := &backoff.Backoff{Max: 5 * time.Minute}
+   for {
+      // Early out if we called Disconnect
+      if !c.running {
+         return errors.New("Already disconnected")
+      }
+
+      // Display error details if previous attempt failed.
+      if connerr != nil {
+         attempt := int(connect_backoff.Attempt())
+         duration := connect_backoff.Duration()
+
+         msg := fmt.Sprintf("Connection error: %s", connerr)
+         if attempt > 0 {
+            msg += fmt.Sprintf(" (Attempt: %d", attempt)
+            if maxAttempts > 0 {
+               msg += fmt.Sprintf("/%d", maxAttempts)
+            }
+            msg += ")"
+         }
+         c.Infof(msg)
+
+         // Give up if we have reached the maximum number of attempts.
+         if maxAttempts >= 0 && attempt >= maxAttempts {
+            return errors.New(fmt.Sprintf("Failed to connect after %d attempts", attempt))
+         }
+
+         connerr = nil
+         chshare.SleepSignal(duration)
+      }
+
+      // Construct dialer that is used to connect to server.
+      dialer := websocket.Dialer{
+         ReadBufferSize:  1024,
+         WriteBufferSize: 1024,
+         Subprotocols:    []string{chshare.ProtocolVersion},
+         TLSClientConfig: tlsConfig,
+      }
+
+      // Optionally add CONNECT proxy
+      if c.httpProxyURL != nil {
+         dialer.Proxy = func(*http.Request) (*url.URL, error) {
+            return c.httpProxyURL, nil
+         }
+      }
+
+      // Connect to the HTTP server using websockets.
+      wsConn, _, err := dialer.Dial(c.server, nil)
+      if err != nil {
+         connerr = err
+         continue
+      }
+
+      // Perform SSH handshake on net.Conn
+      c.Debugf("Handshaking...")
+      conn := chshare.NewWebSocketConn(wsConn)
+      sshConn, chans, reqs, err := ssh.NewClientConn(conn, "", c.sshConfig)
+      // Early out if websocket connection failed.
+      if err != nil {
+         if strings.Contains(err.Error(), "unable to authenticate") {
+            c.Infof("Authentication failed")
+            c.Debugf(err.Error())
+            err = errors.New("Authentication failed")
+         } else {
+            c.Infof(err.Error())
+         }
+         wsConn.Close()
+
+         return err
+      }
+
+      // Attempt to send configuration
+      c.config.shared.Version = chshare.BuildVersion
+      conf, _ := chshare.EncodeConfig(c.config.shared)
+      c.Debugf("Sending config")
+      t0 := time.Now()
+      _, configerr, err := sshConn.SendRequest("config", true, conf)
+      if err != nil {
+         c.Infof("Config verification failed")
+         return errors.New("Config verification failed");
+      }
+
+      // Early out if sending configuration failed.
+      if len(configerr) > 0 {
+         c.Infof(string(configerr))
+         sshConn.Close()
+         return errors.New(string(configerr))
+      }
+
+      // At this point we are connected. We indicate that be setting sshCon.
+      c.Infof("Connected (Latency %s)", time.Since(t0))
+      connect_backoff.Reset()
+      c.sshConn = sshConn
+
+      // Discard requests and reject all tunnels.
+      go ssh.DiscardRequests(reqs)
+      go chshare.RejectStreams(chans)
+      break;
+   }
+
+   // Early out if we are not connected.
+   if c.sshConn == nil {
+      close(c.runningc)
+      return nil;
+   }
+
+   // Optionally create a ticker for keepalive.
+   var ticker *time.Ticker = nil;
+   if c.config.KeepAlive > 0 {
+      ticker = time.NewTicker(c.config.KeepAlive)
+      go func() {
+         for range ticker.C {
+            if c.sshConn != nil {
+               c.sshConn.SendRequest("ping", true, nil)
+            }
+         }
+      }()
+   }
+
+   // Start all of the proxies
+   for i, r := range c.config.shared.Remotes {
+      proxy := newTCPProxy(c, i, r)
+      if err := proxy.start(); err != nil {
+         return err
+      }
+      c.proxies = append(c.proxies, proxy)
+   }
+
+   go func() {
+      // Wait for connection to be lost.
+      err := c.sshConn.Wait()
+
+      // Display error message about disconnect.
+      if err != nil && err != io.EOF {
+         if !strings.Contains(err.Error(), "use of closed network connection") {
+            c.Infof("Disconnected error: %s", err)
+         }
+      }
+
+      // Stop and clear all proxies.
+      for _, proxy := range c.proxies {
+         proxy.stop()
+      }
+      c.proxies = nil;
+
+      // Stop the keepalive ticker
+      if ticker != nil {
+         ticker.Stop()
+         ticker = nil
+         c.Infof("Keep alive ticker stopped")
+      }
+
+      // At this point we are disconnected. We indicate that be setting sshCon to nul.
+      c.sshConn = nil
+
+      close(c.runningc)
+   }()
+
+   return nil;
+}
+
+
+/**
+ * Disconnect from the server.
+ */
+func (c *Client) Disconnect() error {
+   c.running = false
+
+   if c.sshConn == nil {
+      return nil
+   }
+
+   c.Infof("Disconnecting")
+
+   // Start the process of closing the connection
+   err := c.sshConn.Close()
+   if err != nil {
+      c.Infof("Failed to disconnect")
+      return err;
+   }
+
+   c.Infof("Disconnected")
+
+   return nil;
 }
