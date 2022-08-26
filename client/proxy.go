@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 
 	"github.com/jpillora/chisel/share"
 )
@@ -42,7 +43,11 @@ func (p *tcpProxy) listen() {
 	for {
 		src, err := p.listener.Accept()
 		if err != nil {
-			p.Infof("Accept error: %s", err)
+			if !strings.Contains(err.Error(), "use of closed network connection") {
+				p.Infof("Accept error: %s", err)
+			} else {
+				p.Infof("Done listening")
+			}
 			return
 		}
 		go p.accept(src)
